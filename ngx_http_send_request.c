@@ -501,7 +501,7 @@ handle_read(ngx_event_t *ev)
             size += tmp->buf->last - tmp->buf->start;
 
         body->data = ngx_palloc(ctx->pool, size);
-        if (body == NULL)
+        if (body->data == NULL)
             goto nomem;
 
         for (tmp = ctx->body; tmp; tmp = tmp->next) {
