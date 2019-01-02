@@ -499,14 +499,22 @@ ngx_http_upsync_sync_upstream_handler(ngx_int_t rc,
     ngx_uint_t                           hash = 0;
 
     if (rc == NGX_ERROR) {
+
         ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
                      "http_upsync upstream: [%V], failed to upsync",
                      &ctx->hscf->uscf->host);
         goto end;
     } else if (rc == NGX_DECLINED) {
+
         ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
                      "http_upsync upstream: [%V], upsync timeout",
                      &ctx->hscf->uscf->host);
+        goto end;
+    } else if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+
+        ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
+                     "http_upsync upstream: [%V], upsync status=%d",
+                     &ctx->hscf->uscf->host, rc);
         goto end;
     }
 

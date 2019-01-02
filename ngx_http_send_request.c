@@ -21,6 +21,7 @@ typedef struct {
     ngx_http_chunked_t       *chunked;
     ngx_buf_t                *last;
     ngx_http_request_t        r;
+    ngx_str_t                 traceid;
 } ngx_http_send_request_ctx_t;
 
 
@@ -122,6 +123,8 @@ handle_write(ngx_event_t *ev)
 
     if (ev->timedout) {
 
+        ngx_log_error(NGX_LOG_DEBUG, ngx_cycle->log, 0,
+                      "[%V] http_send_request:write() timeout", &ctx->traceid);
         ngx_close_connection(c);
         return ctx->handler(NGX_DECLINED, NULL, 0, NULL, ctx->data);
     }
@@ -209,6 +212,10 @@ parse_header(ngx_http_send_request_ctx_t *ctx)
         if (ngx_strncasecmp(h->value.data, (u_char *) "chunked", 7) == 0)
             ctx->chunked = ngx_pcalloc(ctx->pool, sizeof(ngx_http_chunked_t));
 
+    ngx_log_error(NGX_LOG_DEBUG, ngx_cycle->log, 0,
+                  "[%V] http_send_request:header() %V: %V",
+                  &ctx->traceid, &h->key, &h->value);
+
     return NGX_OK;
 }
 
@@ -269,6 +276,7 @@ receive_buf(ngx_connection_t *c)
     ngx_http_send_request_ctx_t  *ctx = c->data;
     ngx_chain_t                  *ch;
     ssize_t                       size;
+    ngx_str_t                     chunk;
 
     if (ctx->headers_readed && ctx->body == NULL) {
 
@@ -296,6 +304,18 @@ receive_buf(ngx_connection_t *c)
     else
         size = c->recv(c, ctx->last->last,
             ngx_min(ctx->remains, ctx->last->end - ctx->last->last));
+
+    ngx_log_error(NGX_LOG_DEBUG, ngx_cycle->log, 0,
+                  "[%V] http_send_request:recv() rc=%d, eof=%d",
+                  &ctx->traceid, size, c->read->pending_eof);
+
+    if (size > 0) {
+        chunk.data = ctx->last->last;
+        chunk.len = size;
+        ngx_log_error(NGX_LOG_DEBUG, ngx_cycle->log, 0,
+                      "[%V] http_send_request:recv()\n%V",
+                      &ctx->traceid, &chunk);
+    }
 
     if (size == NGX_ERROR)
         return c->read->pending_eof ? NGX_OK : NGX_ERROR;
@@ -353,6 +373,10 @@ receive_response(ngx_connection_t *c)
 {
     ngx_http_send_request_ctx_t  *ctx = c->data;
 
+    ngx_log_error(NGX_LOG_DEBUG, c->log, 0,
+                  "[%V] http_send_request:on_recv() %s",
+                  &ctx->traceid, ctx->headers_readed ? "continue" : "start");
+
     if (ctx->headers_readed)
         return receive_body(c);
 
@@ -363,6 +387,9 @@ receive_response(ngx_connection_t *c)
         switch (ngx_http_parse_status_line(&ctx->r, ctx->last, &ctx->status)) {
 
             case NGX_OK:
+                ngx_log_debug(NGX_LOG_DEBUG, ngx_cycle->log, 0,
+                              "[%V] http_send_request:status() code=%d",
+                              &ctx->traceid, ctx->status.code);
                 break;
 
             case NGX_AGAIN:
@@ -420,6 +447,8 @@ handle_read(ngx_event_t *ev)
 
     if (ev->timedout) {
 
+        ngx_log_debug(NGX_LOG_DEBUG, ngx_cycle->log, 0,
+                      "[%V] http_send_request:read() timeout", &ctx->traceid);
         ngx_close_connection(c);
         return ctx->handler(NGX_DECLINED, NULL, 0, NULL, ctx->data);
     }
@@ -444,11 +473,11 @@ handle_read(ngx_event_t *ev)
 
     ngx_del_timer(c->read);
 
-    ngx_close_connection(c);
-
     body = ngx_pcalloc(ctx->pool, sizeof(ngx_str_t));
     if (body == NULL)
         goto error;
+
+    ngx_close_connection(c);
 
     if (ctx->body != NULL) {
 
@@ -469,10 +498,17 @@ handle_read(ngx_event_t *ev)
         assert(size == body->len);
     }
 
+    ngx_log_error(NGX_LOG_DEBUG, ngx_cycle->log, 0,
+                  "[%V] http_send_request:completed() code=%d",
+                  &ctx->traceid, ctx->status.code);
+
     return ctx->handler(ctx->status.code,
         ctx->headers->elts, ctx->headers->nelts, body, ctx->data);
 
 error:
+
+    ngx_log_error(NGX_LOG_DEBUG, ngx_cycle->log, 0,
+                  "[%V] http_send_request:read() error", &ctx->traceid);
 
     ngx_close_connection(c);
     ctx->handler(NGX_ERROR, NULL, 0, NULL, ctx->data);
@@ -529,6 +565,9 @@ ngx_http_send_request(ngx_pool_t *pool, ngx_str_t method, ngx_url_t *url,
     ngx_peer_connection_t        *pc;
     ngx_connection_t             *c;
     ngx_int_t                     rc;
+    ngx_uint_t                    j;
+
+    static char  alphabet[] = "1234567890abcdef";
 
     request = build_http_request(pool, method, url,
         args, nargs, headers, nheaders, body);
@@ -539,6 +578,14 @@ ngx_http_send_request(ngx_pool_t *pool, ngx_str_t method, ngx_url_t *url,
     ctx = ngx_pcalloc(pool, sizeof(ngx_http_send_request_ctx_t));
     if (ctx == NULL)
         return NGX_ERROR;
+
+    ctx->traceid.data = ngx_pcalloc(pool, 17);
+    if (ctx->traceid.data == NULL)
+        return NGX_ERROR;
+
+    for (j = 0; j < 16; j++)
+        ctx->traceid.data[j] = alphabet[ngx_random() % (sizeof(alphabet) - 1)];
+    ctx->traceid.len = 16;
 
     ctx->handler = handler;
     ctx->data    = data;
@@ -586,6 +633,10 @@ ngx_http_send_request(ngx_pool_t *pool, ngx_str_t method, ngx_url_t *url,
     c->read->log  = ngx_cycle->log;
     c->write->log = ngx_cycle->log;
     c->sendfile   = 0;
+
+    ngx_log_error(NGX_LOG_DEBUG, ngx_cycle->log, 0,
+                  "[%V] http_send_request:open() fd=%d, host=%V:%d, URL: %V",
+                  &ctx->traceid, c->fd, &url->host, url->port, &url->uri);
 
     if (rc != NGX_AGAIN) {
 
