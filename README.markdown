@@ -18,7 +18,7 @@ http {
     upsync_header Accept text/plain;
     upsync_interval 10s;
     upsync_timeout 10s;
-    upsync_file conf/app1.peers;
+    upsync_file app1.peers;
 
     dns_update 60s;
     dns_add_down on;
@@ -27,8 +27,6 @@ http {
     check_request_uri GET /health;
     check_response_codes 200;
     check_response_body alive;
-
-    include app1.peers;
   }
 
   upstream app2 {
@@ -40,7 +38,7 @@ http {
     upsync_header Accept text/plain;
     upsync_interval 10s;
     upsync_timeout 10s;
-    upsync_file conf/app2.peers;
+    upsync_file app2.peers;
 
     dns_update 60s;
     dns_add_down on;
@@ -49,8 +47,6 @@ http {
     check_request_uri GET /health;
     check_response_codes 200;
     check_response_body alive;
-
-    include app2.peers;
   }
 
   upstream app3 {
@@ -61,7 +57,7 @@ http {
     upsync_header Accept text/plain;
     upsync_interval 10s;
     upsync_timeout 10s;
-    upsync_file conf/app3.peers;
+    upsync_file app3.peers;
 
     dns_update 60s;
     dns_add_down on;
@@ -70,8 +66,6 @@ http {
     check_request_uri GET /health;
     check_response_codes 200;
     check_response_body alive;
-
-    include app3.peers;
   }
 
   server {
