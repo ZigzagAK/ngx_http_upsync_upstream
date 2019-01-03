@@ -548,46 +548,66 @@ ngx_http_upsync_sync_upstream_handler(ngx_int_t rc,
                      "http_upsync upstream: [%V], upsync timeout",
                      &ctx->hscf->uscf->host);
         goto end;
-    } else if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+    } else if (rc != NGX_HTTP_OK && rc != NGX_HTTP_NO_CONTENT) {
 
         ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
-                     "http_upsync upstream: [%V], upsync status=%d",
-                     &ctx->hscf->uscf->host, rc);
+                     "http_upsync upstream: [%V], upsync status=%d "
+                     "(not 200, 204)", &ctx->hscf->uscf->host, rc);
         goto end;
     }
 
-    names = ngx_array_create(ctx->pool, 20, sizeof(ngx_str_t));
+    names = ngx_array_create(ctx->pool, 100, sizeof(ngx_str_t));
     if (names == NULL)
         goto nomem;
 
-    for (s1 = s2 = body->data; s2 < body->data + body->len; s2++) {
-        if (*s2 == LF || s2 == body->data + body->len - 1) {
-            name = ngx_array_push(names);
-            if (name == NULL)
-                goto nomem;
-            name->data = s1;
-            name->len = s2 - s1;
-            hash += ngx_crc32_short(name->data, name->len);
-            if (*s2 == LF)
-                *s2++ = 0;
-            while (s2 < body->data + body->len && isspace(*s2))
-                s2++;
-            s1 = s2;
+    if (rc == NGX_HTTP_OK) {
+
+        while (body->len > 0 && isspace(*body->data)) {
+            body->data++;
+            body->len--;
+        }
+
+        for (s1 = s2 = body->data;
+             s2 < body->data + body->len;
+             s2++) {
+
+            if (isspace(*s2) || s2 == body->data + body->len - 1) {
+
+                name = ngx_array_push(names);
+                if (name == NULL)
+                    goto nomem;
+
+                name->data = s1;
+                name->len = s2 - s1;
+
+                if (isspace(*s2))
+                    *s2++ = 0;
+                else if (s2 == body->data + body->len - 1)
+                    name->len++;
+
+                hash += ngx_crc32_short(name->data, name->len);
+
+                while (s2 < body->data + body->len && isspace(*s2))
+                    s2++;
+                s1 = s2;
+            }
+        }
+
+        if (names->nelts == 0) {
+
+            ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
+                          "http_upsync upstream: [%V], upsync status=200 "
+                          "and body is empty", &ctx->hscf->uscf->host);
+            goto end;
         }
     }
 
-    if (hash != ctx->hscf->hash) {
+    if (hash == ctx->hscf->hash)
+        goto end;
 
-        if (names->nelts != 0 || body->len == 0)
-            ngx_http_upsync_sync_upstream_ready(ctx->hscf, names);
-        else {
-            ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
-                         "http_upsync upstream: [%V], failed to parse (empty?)",
-                         &ctx->hscf->uscf->host);
-        }
+    ngx_http_upsync_sync_upstream_ready(ctx->hscf, names);
 
-        ctx->hscf->hash = hash;
-    }
+    ctx->hscf->hash = hash;
 
 end:
 
@@ -601,7 +621,7 @@ end:
 nomem:
 
     ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, "no memory");
-    ngx_destroy_pool(ctx->pool);
+    goto end;
 }
 
 

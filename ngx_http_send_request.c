@@ -194,6 +194,10 @@ parse_header(ngx_http_send_request_ctx_t *ctx)
     ngx_http_request_t  *r = &ctx->r;
     ngx_keyval_t        *h;
 
+    static ngx_str_t  CT_LENGTH   = ngx_string("content-length");
+    static ngx_str_t  TR_ENCODING = ngx_string("transfer-encoding");
+    static ngx_str_t  CHUNKED     = ngx_string("chunked");
+
     switch (ngx_http_parse_header_line(r, ctx->last, 1)) {
         case NGX_OK:
             break;
@@ -227,12 +231,12 @@ parse_header(ngx_http_send_request_ctx_t *ctx)
     h->value.data = r->header_start;
     h->value.data[h->value.len] = 0;
 
-    if (ngx_strncasecmp(h->key.data, (u_char *) "content-length", 14) == 0)
+    if (ngx_strncasecmp(h->key.data, CT_LENGTH.data, CT_LENGTH.len) == 0)
         ctx->remains = ngx_atoi(h->value.data, h->value.len);
 
-    if (ngx_strncasecmp(h->key.data, (u_char *) "transfer-encoding", 17) == 0)
-        if (ngx_strncasecmp(h->value.data, (u_char *) "chunked", 7) == 0)
-            ctx->chunked = ngx_pcalloc(ctx->pool, sizeof(ngx_http_chunked_t));
+    if (ngx_strncasecmp(h->key.data, TR_ENCODING.data, TR_ENCODING.len) == 0
+        && ngx_strncasecmp(h->value.data, CHUNKED.data, CHUNKED.len) == 0)
+        ctx->chunked = ngx_pcalloc(ctx->pool, sizeof(ngx_http_chunked_t));
 
     log_error_details(NGX_LOG_DEBUG, ctx, "recv", "header", "%V: %V",
         &h->key, &h->value);
