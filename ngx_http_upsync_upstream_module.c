@@ -510,37 +510,6 @@ ngx_http_upsync_upstream_exit_worker(ngx_cycle_t *cycle)
 }
 
 
-static ngx_flag_t
-ngx_http_upsync_exists(ngx_http_upstream_rr_peers_t *primary,
-    ngx_str_t *name)
-{
-    ngx_http_upstream_rr_peer_t   *peer;
-    ngx_http_upstream_rr_peers_t  *peers;
-    ngx_uint_t                     j = 0;
-
-    ngx_rwlock_rlock(&primary->rwlock);
-
-    for (peers = primary;
-         peers && j < 2;
-         peers = peers->next, j++) {
-
-        for (peer = peers->peer;
-             peer;
-             peer = peer->next) {
-
-            if (str_eq(peer->server, *name) || str_eq(peer->name, *name)) {
-                ngx_rwlock_unlock(&primary->rwlock);
-                return 1;
-            }
-        }
-    }
-
-    ngx_rwlock_unlock(&primary->rwlock);
-
-    return 0;
-}
-
-
 static void
 ngx_http_upsync_op_defaults(ngx_dynamic_upstream_op_t *op,
     ngx_str_t *upstream, ngx_str_t *server, ngx_str_t *name, int operation,
@@ -669,14 +638,29 @@ ngx_http_upsync_sync_upstream_ready(ngx_http_upsync_upstream_srv_conf_t *hscf,
         ngx_http_upsync_op_defaults(&op, &hscf->uscf->host, elts + j,
             NULL, NGX_DYNAMIC_UPSTEAM_OP_ADD, &hscf->defaults);
 
-        if (!ngx_http_upsync_exists(hscf->uscf->peer.data, elts + j)) {
+again:
 
-            if (ngx_dynamic_upstream_op(ngx_cycle->log, &op, hscf->uscf)
-                    == NGX_ERROR) {
+        switch (ngx_dynamic_upstream_op(ngx_cycle->log, &op, hscf->uscf)) {
+
+            case NGX_OK:
+                if (op.status == NGX_HTTP_NOT_MODIFIED) {
+
+                    op.op = NGX_DYNAMIC_UPSTEAM_OP_PARAM;
+                    op.status = NGX_HTTP_OK;
+                    op.err = "unknown";
+                    goto again;
+                }
+                break;
+
+            case NGX_AGAIN:
+                break;
+
+            case NGX_ERROR:
+            default:
                 ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
                               "http_upsync upstream: [%V] %s", &op.upstream,
                               op.err);
-            }
+                return;
         }
     }
 
