@@ -231,8 +231,9 @@ parse_token(ngx_dynamic_upstream_op_t *op,
 #endif
 }
 
+
 static void
-ngx_http_upsync_op_parse_server(ngx_dynamic_upstream_op_t *op,
+parse_server(ngx_dynamic_upstream_op_t *op,
     ngx_str_t *server)
 {
     /*
@@ -473,11 +474,8 @@ ngx_http_upsync_upstream_post_conf(ngx_conf_t *cf)
             return NGX_ERROR;
         }
 
-        if (hscf->interval == NGX_CONF_UNSET_MSEC)
-            hscf->interval = 60000;
-
-        if (hscf->timeout == NGX_CONF_UNSET_MSEC)
-            hscf->timeout = 10000;
+        ngx_conf_init_msec_value(hscf->interval, 60000);
+        ngx_conf_init_msec_value(hscf->timeout, 10000);
 
         ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
                       "http_upsync upstream: [%V] sync on", &hscf->uscf->host);
@@ -549,7 +547,6 @@ ngx_http_upsync_op_defaults(ngx_dynamic_upstream_op_t *op,
     ngx_dynamic_upstream_op_t *defaults)
 {
     ngx_memcpy(op, defaults, sizeof(ngx_dynamic_upstream_op_t));
-
     ngx_str_null(&op->server);
 
     op->op = operation;
@@ -559,7 +556,7 @@ ngx_http_upsync_op_defaults(ngx_dynamic_upstream_op_t *op,
 
     op->op_param |= NGX_DYNAMIC_UPSTEAM_OP_PARAM_RESOLVE;
 
-    ngx_http_upsync_op_parse_server(op, server);
+    parse_server(op, server);
 
     if (!op->down) {
 
@@ -619,9 +616,6 @@ ngx_http_upsync_remove_obsoleted(ngx_http_upsync_upstream_srv_conf_t *hscf,
             for (i = 0; i < names->nelts; i++) {
 
                 if (str_eq(peer->server, elts[i]))
-                    break;
-
-                if (str_eq(peer->name, elts[i]))
                     break;
             }
 
