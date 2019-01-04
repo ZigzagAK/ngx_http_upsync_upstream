@@ -16,8 +16,11 @@ http {
 
     upsync localhost:8888/registry/nodes?service=app1;
     upsync_header Accept text/plain;
+
     upsync_interval 10s;
     upsync_timeout 10s;
+
+    upsync_defaults max_conns=10 max_fails=1 fail_timeout=30s;
     upsync_file app1.peers;
 
     dns_update 60s;
@@ -34,10 +37,13 @@ http {
 
     upsync localhost:8888/registry/nodes?service=app2;
     # Admin:1111
-    upsync_header Authorization "Bearer QWRtaW46MTExMQ==";
+    upsync_header Authorization "Basic QWRtaW46MTExMQ==";
     upsync_header Accept text/plain;
+
     upsync_interval 10s;
     upsync_timeout 10s;
+
+    upsync_defaults max_conns=10 max_fails=1 fail_timeout=30s;
     upsync_file app2.peers;
 
     dns_update 60s;
@@ -55,8 +61,11 @@ http {
     upsync localhost:8888/registry/app3;
     # Admin:1111
     upsync_header Accept text/plain;
+
     upsync_interval 10s;
     upsync_timeout 10s;
+
+    upsync_defaults max_conns=10 max_fails=1 fail_timeout=30s;
     upsync_file app3.peers;
 
     dns_update 60s;
@@ -80,10 +89,12 @@ http {
     # app1
     listen 8001;
     listen 8002;
+    listen 8003;
 
     #app2
     listen 9001;
     listen 9002;
+    listen 9003;
 
     location = /health {
       return 200 'alive';
@@ -114,12 +125,14 @@ http {
 
     location = /registry/nodes {
       if ($arg_service = app1) {
-        echo localhost:8001;
-        echo localhost:8002;
+        echo "localhost:8001 weight=1 max_conns=10 max_fails=2 fail_timeout=10s";
+        echo "localhost:8002 weight=2 max_conns=20 max_fails=2 fail_timeout=5s";
+        echo "localhost:8003 max_conns=50 max_fails=2 fail_timeout=10s backup";
       }
       if ($arg_service = app2) {
-        echo localhost:9001;
-        echo localhost:9002;
+        echo "localhost:9001";
+        echo "localhost:9002";
+        echo "localhost:9002 backup";
       }
     }
 
