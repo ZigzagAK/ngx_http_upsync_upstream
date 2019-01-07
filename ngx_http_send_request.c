@@ -88,24 +88,32 @@ test_connect(ngx_connection_t *c)
 
 
 static ngx_int_t
-post_checks(ngx_event_t *ev)
+handle_event(ngx_event_t *ev)
 {
     ngx_connection_t  *c = (ngx_connection_t *) ev->data;
 
-    if (!ev->ready)
+    if (ev->write) {
+
+        if (ngx_handle_write_event(c->write, 0) == NGX_OK)
+            return NGX_OK;
+
+        test_connect(c);
+        return NGX_ERROR;
+    }
+
+    if (ngx_handle_read_event(c->read, 0) == NGX_OK)
         return NGX_OK;
 
-    if (ev->write && ngx_handle_write_event(c->write, 0) != NGX_OK) {
+    test_connect(c);
+    return NGX_ERROR;
+}
 
-        test_connect(c);
-        return NGX_ERROR;
-    }
 
-    if (!ev->write && ngx_handle_read_event(c->read, 0) != NGX_OK) {
-
-        test_connect(c);
-        return NGX_ERROR;
-    }
+static ngx_int_t
+handle_io_event(ngx_event_t *ev)
+{
+    if (ev->ready)
+        return handle_event(ev);
 
     return NGX_OK;
 }
@@ -117,18 +125,14 @@ handle_dummy(ngx_event_t *ev)
     ngx_connection_t             *c = ev->data;
     ngx_http_send_request_ctx_t  *ctx = c->data;
 
-    test_connect(c);
-
-    if (!ev->ready)
+    if (handle_io_event(ev) == NGX_OK)
         return;
 
-    if (post_checks(ev) == NGX_ERROR) {
+    log_error(NGX_LOG_ERR, ctx, "dummy", NULL);
 
-        log_error(NGX_LOG_ERR, ctx, "dummy", NULL);
-        ngx_del_timer(c->write);
-        ngx_close_connection(c);
-        ctx->handler(NGX_ERROR, NULL, 0, NULL, ctx->data);
-    }
+    ngx_close_connection(c);
+
+    ctx->handler(NGX_ERROR, NULL, 0, NULL, ctx->data);
 }
 
 
@@ -146,6 +150,7 @@ handle_write(ngx_event_t *ev)
 
         log_error(NGX_LOG_ERR, ctx, "write", "timeout");
         ngx_close_connection(c);
+
         return ctx->handler(NGX_DECLINED, NULL, 0, NULL, ctx->data);
     }
 
@@ -155,8 +160,8 @@ handle_write(ngx_event_t *ev)
     if (size == NGX_ERROR) {
 
         log_error(NGX_LOG_ERR, ctx, "write", NULL);
-        ngx_del_timer(c->write);
         ngx_close_connection(c);
+
         return ctx->handler(NGX_ERROR, NULL, 0, NULL, ctx->data);
     }
 
@@ -170,11 +175,11 @@ handle_write(ngx_event_t *ev)
 
     // request has been sent
 
-    if (post_checks(ev) == NGX_ERROR) {
+    if (handle_io_event(ev) == NGX_ERROR) {
 
         log_error(NGX_LOG_ERR, ctx, "write", NULL);
-        ngx_del_timer(c->write);
         ngx_close_connection(c);
+
         return ctx->handler(NGX_ERROR, NULL, 0, NULL, ctx->data);
     }
 
@@ -188,15 +193,56 @@ handle_write(ngx_event_t *ev)
 }
 
 
+static void
+process_content_length(ngx_http_send_request_ctx_t *ctx, ngx_keyval_t *h)
+{
+    static ngx_str_t  c_length = ngx_string("content-length");
+
+    if (ctx->remains != -1)
+        return;
+
+    if (h->key.len != c_length.len)
+        return;
+
+    if (ngx_strncasecmp(h->key.data, c_length.data, c_length.len) == 0)
+        ctx->remains = ngx_atoi(h->value.data, h->value.len);
+}
+
+
+static void
+process_transfer_encoding(ngx_http_send_request_ctx_t *ctx, ngx_keyval_t *h)
+{
+    static ngx_str_t  t_encoding = ngx_string("transfer-encoding");
+    static ngx_str_t  chunked    = ngx_string("chunked");
+
+    if (ctx->remains != -1 || ctx->chunked != NULL)
+        return;
+
+    if (h->key.len != t_encoding.len || h->value.len != chunked.len)
+        return;
+
+    if (ngx_strncasecmp(h->key.data, t_encoding.data, t_encoding.len) != 0
+        || ngx_strncasecmp(h->value.data, chunked.data, chunked.len) != 0)
+        return;
+
+    ctx->chunked = ngx_pcalloc(ctx->pool, sizeof(ngx_http_chunked_t));
+}
+
+
+static void
+ngx_set_string(ngx_str_t *s, u_char *b, u_char *e)
+{
+    s->len = e - b;
+    s->data = b;
+    s->data[s->len] = 0;
+}
+
+
 static ngx_int_t
 parse_header(ngx_http_send_request_ctx_t *ctx)
 {
     ngx_http_request_t  *r = &ctx->r;
     ngx_keyval_t        *h;
-
-    static ngx_str_t  CT_LENGTH   = ngx_string("content-length");
-    static ngx_str_t  TR_ENCODING = ngx_string("transfer-encoding");
-    static ngx_str_t  CHUNKED     = ngx_string("chunked");
 
     switch (ngx_http_parse_header_line(r, ctx->last, 1)) {
         case NGX_OK:
@@ -223,23 +269,14 @@ parse_header(ngx_http_send_request_ctx_t *ctx)
     if (h == NULL)
         return NGX_ERROR;
 
-    h->key.len = r->header_name_end - r->header_name_start;
-    h->key.data = r->header_name_start;
-    h->key.data[h->key.len] = 0;
-
-    h->value.len = r->header_end - r->header_start;
-    h->value.data = r->header_start;
-    h->value.data[h->value.len] = 0;
-
-    if (ngx_strncasecmp(h->key.data, CT_LENGTH.data, CT_LENGTH.len) == 0)
-        ctx->remains = ngx_atoi(h->value.data, h->value.len);
-
-    if (ngx_strncasecmp(h->key.data, TR_ENCODING.data, TR_ENCODING.len) == 0
-        && ngx_strncasecmp(h->value.data, CHUNKED.data, CHUNKED.len) == 0)
-        ctx->chunked = ngx_pcalloc(ctx->pool, sizeof(ngx_http_chunked_t));
+    ngx_set_string(&h->key, r->header_name_start, r->header_name_end);
+    ngx_set_string(&h->value, r->header_start, r->header_end);
 
     log_error_details(NGX_LOG_DEBUG, ctx, "recv", "header", "%V: %V",
         &h->key, &h->value);
+
+    process_content_length(ctx, h);
+    process_transfer_encoding(ctx, h);
 
     return NGX_OK;
 }
@@ -263,10 +300,10 @@ parse_headers(ngx_http_send_request_ctx_t *ctx)
                 return NGX_HTTP_PARSE_HEADER_DONE;
         }
 
-        return NGX_ERROR;
+        break;
     }
 
-    return NGX_HTTP_PARSE_HEADER_DONE;
+    return NGX_ERROR;
 }
 
 
@@ -279,13 +316,24 @@ parse_body(ngx_http_send_request_ctx_t *ctx)
         ctx->body = ctx->chains;
     }
 
-    if (ctx->chunked) {
+    if (ctx->chunked != NULL) {
 
         log_error(NGX_LOG_ERR, ctx, "write", "chunked unsupported");
         return NGX_ERROR;
     }
 
+    if (ctx->remains == -1)
+        // receiving data until to close connection for HTTP/1.0
+        return NGX_AGAIN;
+
     ctx->remains -= ctx->last->last - ctx->last->pos;
+
+    if (ctx->remains < 0) {
+
+        // fix buffer to content-length header
+        ctx->last->last += ctx->remains;
+        ctx->remains = 0;
+    }
 
     if (ctx->remains == 0)
         return NGX_OK;
@@ -295,18 +343,12 @@ parse_body(ngx_http_send_request_ctx_t *ctx)
 
 
 static ngx_int_t
-receive_buf(ngx_connection_t *c)
+receive_data(ngx_connection_t *c)
 {
     ngx_http_send_request_ctx_t  *ctx = c->data;
     ngx_chain_t                  *ch;
     ssize_t                       size;
     ngx_str_t                     chunk;
-
-    if (ctx->headers_readed && ctx->body == NULL) {
-
-        ctx->last->start = ctx->last->pos;
-        ctx->body = ctx->chains;
-    }
 
     if (ctx->last->end == ctx->last->last) {
 
@@ -323,7 +365,7 @@ receive_buf(ngx_connection_t *c)
         ctx->last = ch->buf;
     }
 
-    if (ctx->chunked || ctx->remains == 0)
+    if (ctx->chunked != NULL || ctx->remains == -1)
         size = c->recv(c, ctx->last->last, ctx->last->end - ctx->last->last);
     else
         size = c->recv(c, ctx->last->last,
@@ -365,28 +407,24 @@ receive_body(ngx_connection_t *c)
 
             case NGX_AGAIN:
                 break;
-
-            case NGX_ERROR:
-            default:
-                return NGX_ERROR;
         }
 
-        switch (receive_buf(c)) {
+        switch (receive_data(c)) {
 
             case NGX_OK:
                 return NGX_OK;
 
             case NGX_DONE:
-                break;
+                continue;
 
             case NGX_AGAIN:
                 return NGX_AGAIN;
-
-            case NGX_ERROR:
-            default:
-                return NGX_ERROR;
         }
+
+        break;
     }
+
+    return NGX_ERROR;
 }
 
 
@@ -413,7 +451,7 @@ receive_response(ngx_connection_t *c)
                 break;
 
             case NGX_AGAIN:
-                goto recv_buf;
+                goto receive;
 
             case NGX_ERROR:
             default:
@@ -431,19 +469,19 @@ receive_response(ngx_connection_t *c)
                 return receive_body(c);
 
             case NGX_AGAIN:
-                goto recv_buf;
+                goto receive;
 
             case NGX_ERROR:
             default:
                 return NGX_ERROR;
         }
 
-recv_buf:
+receive:
 
-        switch (receive_buf(c)) {
+        switch (receive_data(c)) {
             case NGX_OK:
             case NGX_DONE:
-                break;
+                continue;
 
             case NGX_AGAIN:
                 return NGX_AGAIN;
@@ -453,6 +491,8 @@ recv_buf:
                 return NGX_ERROR;
         }
     }
+
+    return NGX_ERROR;
 }
 
 
@@ -469,52 +509,64 @@ handle_read(ngx_event_t *ev)
 
         log_error(NGX_LOG_ERR, ctx, "read", "timeout");
         ngx_close_connection(c);
+
         return ctx->handler(NGX_DECLINED, NULL, 0, NULL, ctx->data);
     }
 
     switch (receive_response(c)) {
+
         case NGX_OK:
+
             break;
 
         case NGX_AGAIN:
-            if (post_checks(ev) == NGX_ERROR) {
 
-                ngx_del_timer(c->read);
-                goto error;
-            }
-            return;
+            if (handle_io_event(ev) == NGX_OK)
+                return;
 
         case NGX_ERROR:
         default:
-            ngx_del_timer(c->read);
-            goto error;
+
+            log_error(NGX_LOG_ERR, ctx, "read", NULL);
+            ngx_close_connection(c);
+
+            return ctx->handler(NGX_ERROR, NULL, 0, NULL, ctx->data);
     }
 
-    ngx_del_timer(c->read);
+    ngx_close_connection(c);
 
     body = ngx_pcalloc(ctx->pool, sizeof(ngx_str_t));
     if (body == NULL)
         goto nomem;
 
-    ngx_close_connection(c);
-
     if (ctx->body != NULL) {
 
-        size = 0;
-        for (tmp = ctx->body; tmp; tmp = tmp->next)
-            size += tmp->buf->last - tmp->buf->start;
+        if (ctx->body->next == NULL) {
 
-        body->data = ngx_palloc(ctx->pool, size);
-        if (body->data == NULL)
-            goto nomem;
+            body->data = ctx->body->buf->start;
+            body->len = ctx->body->buf->last - ctx->body->buf->start;
 
-        for (tmp = ctx->body; tmp; tmp = tmp->next) {
-            ngx_memcpy(body->data + body->len, tmp->buf->start,
-                tmp->buf->last - tmp->buf->start);
-            body->len += tmp->buf->last - tmp->buf->start;
+        } else {
+
+            size = 0;
+            for (tmp = ctx->body; tmp; tmp = tmp->next)
+                size += tmp->buf->last - tmp->buf->start;
+
+            body->data = ngx_palloc(ctx->pool, size);
+            if (body->data == NULL)
+                goto nomem;
+
+            for (tmp = ctx->body; tmp; tmp = tmp->next) {
+                ngx_memcpy(body->data + body->len, tmp->buf->start,
+                    tmp->buf->last - tmp->buf->start);
+                body->len += tmp->buf->last - tmp->buf->start;
+            }
+
+            assert(size == body->len);
         }
+    } else {
 
-        assert(size == body->len);
+        ngx_str_set(body, "");
     }
 
     log_error_details(NGX_LOG_DEBUG, ctx, "request", "completed",
@@ -525,12 +577,8 @@ handle_read(ngx_event_t *ev)
 
 nomem:
 
-    ngx_socket_errno = NGX_ENOMEM;
+    log_error(NGX_LOG_ERR, ctx, "read", "no memory");
 
-error:
-
-    log_error(NGX_LOG_ERR, ctx, "read", NULL);
-    ngx_close_connection(c);
     ctx->handler(NGX_ERROR, NULL, 0, NULL, ctx->data);
 }
 
@@ -545,15 +593,15 @@ handle_connect(ngx_event_t *ev)
 
         log_error(NGX_LOG_ERR, ctx, "connect", "timeout");
         ngx_close_connection(c);
+
         return ctx->handler(NGX_DECLINED, NULL, 0, NULL, ctx->data);
     }
 
-    ngx_del_timer(c->write);
-
-    if (test_connect(c) != NGX_OK || post_checks(ev) == NGX_ERROR) {
+    if (handle_io_event(ev) == NGX_ERROR) {
 
         log_error(NGX_LOG_ERR, ctx, "connect", NULL);
         ngx_close_connection(c);
+
         return ctx->handler(NGX_ERROR, NULL, 0, NULL, ctx->data);
     }
 
@@ -615,6 +663,7 @@ ngx_http_send_request(ngx_pool_t *pool, ngx_str_t method, ngx_url_t *url,
     ctx->timeout = timeout;
     ctx->pool    = pool;
     ctx->url     = url;
+    ctx->remains = -1;
 
     ctx->headers = ngx_array_create(pool, 20, sizeof(ngx_keyval_t));
     if (ctx->headers == NULL)
@@ -624,7 +673,7 @@ ngx_http_send_request(ngx_pool_t *pool, ngx_str_t method, ngx_url_t *url,
     if (ctx->chains == NULL)
         return NGX_ERROR;
 
-    ctx->chains->buf = ngx_create_temp_buf(pool, ngx_pagesize * 16);
+    ctx->chains->buf = ngx_create_temp_buf(pool, ngx_pagesize * 8);
     if (ctx->chains->buf== NULL)
         return NGX_ERROR;
     ctx->last = ctx->chains->buf;
