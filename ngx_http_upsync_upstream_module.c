@@ -376,8 +376,10 @@ ngx_http_upsync_upstream_save(ngx_http_upsync_upstream_srv_conf_t *hscf)
     }
 
     f = state_open(&hscf->file, "w+");
-    if (f == NULL)
+    if (f == NULL) {
+        ngx_destroy_pool(pool);
         return;
+    }
 
     primary = hscf->uscf->peer.data;
 
