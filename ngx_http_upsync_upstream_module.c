@@ -368,6 +368,10 @@ ngx_http_upsync_upstream_save(ngx_http_upsync_upstream_srv_conf_t *hscf)
     ngx_str_t                     *server, *s;
     ngx_uint_t                     i;
 
+    static const ngx_str_t
+        default_server = ngx_string("server 0.0.0.0:1 down;");
+    static const ngx_str_t noaddr = ngx_string("0.0.0.0:1");
+
     pool = ngx_create_pool(2048, ngx_cycle->log);
     if (pool == NULL) {
         ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
@@ -399,6 +403,9 @@ ngx_http_upsync_upstream_save(ngx_http_upsync_upstream_srv_conf_t *hscf)
              peer;
              peer = peer->next) {
 
+            if (str_eq(noaddr, peer->name) && !str_eq(noaddr, peer->server))
+                continue;
+
             for (i = 0; i < servers->nelts; i++)
                 if (str_eq(peer->server, server[i]))
                     // already saved
@@ -421,6 +428,9 @@ ngx_http_upsync_upstream_save(ngx_http_upsync_upstream_srv_conf_t *hscf)
             }
         }
     }
+
+    if (ftell(f) == 0)
+        fwrite(default_server.data, default_server.len, 1, f);
 
 end:
 
@@ -566,16 +576,10 @@ ngx_http_upsync_remove_obsoleted(ngx_http_upsync_upstream_srv_conf_t *hscf,
     ngx_array_t *names)
 {
     ngx_http_upstream_rr_peer_t   *peer;
-    ngx_http_upstream_rr_peers_t  *peers, *primary;
-    ngx_uint_t                     j = 0;
+    ngx_http_upstream_rr_peers_t  *peers, *primary = hscf->uscf->peer.data;
+    ngx_uint_t                     i, j = 0;
     ngx_dynamic_upstream_op_t      op;
-    ngx_str_t                     *elts;
-    ngx_uint_t                     i;
-    static ngx_str_t               noaddr = ngx_string("0.0.0.0:1");
-
-    elts = names->elts;
-
-    primary = hscf->uscf->peer.data;
+    ngx_str_t                     *elts = names->elts;
 
     ngx_rwlock_wlock(&primary->rwlock);
 
@@ -587,39 +591,23 @@ ngx_http_upsync_remove_obsoleted(ngx_http_upsync_upstream_srv_conf_t *hscf,
              peer;
              peer = peer->next) {
 
-            for (i = 0; i < names->nelts; i++) {
-
+            for (i = 0; i < names->nelts; i++)
                 if (str_eq(peer->server, elts[i]))
                     break;
-            }
 
-            if (i == names->nelts) {
+            if (i != names->nelts)
+                continue;
 
-again:
+            ngx_http_upsync_op_defaults_locked(&op, &hscf->uscf->host,
+                &peer->server, &peer->name, NGX_DYNAMIC_UPSTEAM_OP_REMOVE,
+                &hscf->defaults);
 
-                ngx_http_upsync_op_defaults_locked(&op, &hscf->uscf->host,
-                    &peer->server, &peer->name, NGX_DYNAMIC_UPSTEAM_OP_REMOVE,
-                    &hscf->defaults);
+            if (ngx_dynamic_upstream_op(ngx_cycle->log, &op, hscf->uscf)
+                    == NGX_ERROR) {
 
-                if (ngx_dynamic_upstream_op(ngx_cycle->log, &op, hscf->uscf)
-                        == NGX_ERROR) {
-
-                    if (op.status == NGX_HTTP_BAD_REQUEST) {
-
-                        ngx_http_upsync_op_defaults_locked(&op,
-                            &hscf->uscf->host, &noaddr, &noaddr,
-                            NGX_DYNAMIC_UPSTEAM_OP_ADD, &hscf->defaults);
-
-                        ngx_dynamic_upstream_op(ngx_cycle->log, &op,
-                            hscf->uscf);
-
-                        if (ngx_strcmp(noaddr.data, peer->name.data) != 0)
-                            goto again;
-                    } else
-                        ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
-                                      "http_upsync upstream: [%V] %s",
-                                      &op.upstream, op.err);
-                }
+                ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
+                              "http_upsync upstream: [%V] %s",
+                              &op.upstream, op.err);
             }
         }
     }
