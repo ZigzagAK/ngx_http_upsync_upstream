@@ -597,7 +597,7 @@ handle_connect(ngx_event_t *ev)
         return ctx->handler(NGX_DECLINED, NULL, 0, NULL, ctx->data);
     }
 
-    if (handle_io_event(ev) == NGX_ERROR) {
+    if (test_connect(c) == NGX_ERROR || handle_io_event(ev) == NGX_ERROR) {
 
         log_error(NGX_LOG_ERR, ctx, "connect", NULL);
         ngx_close_connection(c);
