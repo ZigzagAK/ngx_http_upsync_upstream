@@ -41,6 +41,7 @@ typedef struct
 
     ngx_dynamic_upstream_op_t      defaults;
     ngx_http_upstream_srv_conf_t  *uscf;
+    ngx_event_t                    ev;
 } ngx_http_upsync_upstream_srv_conf_t;
 
 
@@ -301,12 +302,19 @@ ngx_http_upsync_sync_handler(ngx_event_t *ev)
     ngx_add_timer(ev, 1000);
 }
 
-static ngx_connection_t dumb_conn = {
-    .fd = -1
+
+typedef struct {
+    ngx_connection_t                      c;
+    ngx_http_upsync_upstream_srv_conf_t  *hscf;
+} save_context_t;
+
+static save_context_t update = {
+    .c = { .fd = -1 }, .hscf = NULL
 };
+
 static ngx_event_t sync_ev = {
     .handler = ngx_http_upsync_sync_handler,
-    .data = &dumb_conn,
+    .data = &update,
     .log = NULL
 };
 
@@ -355,7 +363,7 @@ ngx_create_upsync_file(ngx_conf_t *cf, void *post, void *data)
 }
 
 
-static void
+static ngx_int_t
 ngx_http_upsync_upstream_save(ngx_http_upsync_upstream_srv_conf_t *hscf)
 {
     ngx_http_upstream_rr_peer_t   *peer;
@@ -366,7 +374,8 @@ ngx_http_upsync_upstream_save(ngx_http_upsync_upstream_srv_conf_t *hscf)
     ngx_pool_t                    *pool;
     ngx_array_t                   *servers;
     ngx_str_t                     *server, *s;
-    ngx_uint_t                     i;
+    ngx_uint_t                     i, unresolved = 0;
+    ngx_int_t                      rc = NGX_ERROR;
 
     static const ngx_str_t
         default_server = ngx_string("server 0.0.0.0:1 down;");
@@ -376,13 +385,13 @@ ngx_http_upsync_upstream_save(ngx_http_upsync_upstream_srv_conf_t *hscf)
     if (pool == NULL) {
         ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
                       "http_upsync upstream: no memory");
-        return;
+        return rc;
     }
 
     f = state_open(&hscf->file, "w+");
     if (f == NULL) {
         ngx_destroy_pool(pool);
-        return;
+        return rc;
     }
 
     primary = hscf->uscf->peer.data;
@@ -403,8 +412,11 @@ ngx_http_upsync_upstream_save(ngx_http_upsync_upstream_srv_conf_t *hscf)
              peer;
              peer = peer->next) {
 
-            if (str_eq(noaddr, peer->name) && !str_eq(noaddr, peer->server))
+            if (str_eq(noaddr, peer->name) && !str_eq(noaddr, peer->server)) {
+
+                unresolved++;
                 continue;
+            }
 
             for (i = 0; i < servers->nelts; i++)
                 if (str_eq(peer->server, server[i]))
@@ -429,8 +441,15 @@ ngx_http_upsync_upstream_save(ngx_http_upsync_upstream_srv_conf_t *hscf)
         }
     }
 
-    if (ftell(f) == 0)
+    if (ftell(f) == 0) {
+
         fwrite(default_server.data, default_server.len, 1, f);
+        rc = NGX_AGAIN;
+
+    }
+
+    if (unresolved == 0)
+        rc = NGX_OK;
 
 end:
 
@@ -440,13 +459,28 @@ end:
 
     ngx_destroy_pool(pool);
 
-    return;
+    return rc;
 
 nomem:
 
     ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
                   "http_upsync upstream: no memory");
     goto end;
+}
+
+
+static void
+ngx_http_upsync_save_handler(ngx_event_t *ev)
+{
+    save_context_t  *ctx = ev->data;
+
+    if (ngx_http_upsync_upstream_save(ctx->hscf) == NGX_OK)
+        return;
+
+    if (ngx_exiting || ngx_terminate || ngx_quit)
+        return;
+
+    ngx_add_timer(ev, 10000);
 }
 
 
@@ -459,6 +493,7 @@ ngx_http_upsync_upstream_post_conf(ngx_conf_t *cf)
     ngx_http_upstream_srv_conf_t         **uscf;
     ngx_http_upsync_upstream_srv_conf_t   *hscf;
     ngx_uint_t                             j;
+    save_context_t                        *ctx;
 
     umcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_module);
     uscf = umcf->upstreams.elts;
@@ -480,6 +515,17 @@ ngx_http_upsync_upstream_post_conf(ngx_conf_t *cf)
         hscf->url.url = hscf->uri;
         hscf->url.uri_part = 1;
         hscf->url.default_port = 80;
+
+        ctx = ngx_pcalloc(cf->pool, sizeof(save_context_t));
+        if (ctx == NULL)
+            return NGX_ERROR;
+
+        ctx->hscf = hscf;
+        ctx->c.fd = -1;
+
+        hscf->ev.log = cf->cycle->log;
+        hscf->ev.data = ctx;
+        hscf->ev.handler = ngx_http_upsync_save_handler;
 
         if (ngx_parse_url(cf->pool, &hscf->url) != NGX_OK) {
 
@@ -616,7 +662,7 @@ ngx_http_upsync_remove_obsoleted(ngx_http_upsync_upstream_srv_conf_t *hscf,
 }
 
 
-static void
+static ngx_int_t
 ngx_http_upsync_sync_upstream_ready(ngx_http_upsync_upstream_srv_conf_t *hscf,
     ngx_array_t *names)
 {
@@ -663,14 +709,16 @@ again:
                 ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
                               "http_upsync upstream: [%V] %s", &op.upstream,
                               op.err);
-                return;
+                return NGX_ERROR;
         }
     }
 
     ngx_http_upsync_remove_obsoleted(hscf, names);
 
     if (hscf->file.data)
-        ngx_http_upsync_upstream_save(hscf);
+        ngx_add_timer(&hscf->ev, 5000);
+
+    return NGX_OK;
 }
 
 
@@ -760,9 +808,8 @@ ngx_http_upsync_sync_upstream_handler(ngx_int_t rc,
     if (hash == ctx->hscf->hash)
         goto end;
 
-    ngx_http_upsync_sync_upstream_ready(ctx->hscf, names);
-
-    ctx->hscf->hash = hash;
+    if (ngx_http_upsync_sync_upstream_ready(ctx->hscf, names) == NGX_OK)
+        ctx->hscf->hash = hash;
 
 end:
 
