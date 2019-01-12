@@ -434,6 +434,8 @@ ngx_http_upsync_upstream_save(ngx_http_upsync_upstream_srv_conf_t *hscf)
                     &peer->server, peer->max_conns, peer->max_fails,
                     peer->fail_timeout, peer->weight);
                 fwrite(srv, c - srv, 1, f);
+                if (hscf->defaults.down)
+                    fwrite(" down", 5, 1, f);
                 if (j == 1)
                     fwrite(" backup", 7, 1, f);
                 fwrite(";\n", 2, 1, f);
