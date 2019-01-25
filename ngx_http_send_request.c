@@ -23,6 +23,7 @@ typedef struct {
     ngx_buf_t                *last;
     ngx_http_request_t        r;
     ngx_str_t                 traceid;
+    ngx_flag_t                eof;
 } ngx_http_send_request_ctx_t;
 
 
@@ -318,13 +319,14 @@ parse_body(ngx_http_send_request_ctx_t *ctx)
 
     if (ctx->chunked != NULL) {
 
-        log_error(NGX_LOG_ERR, ctx, "write", "chunked unsupported");
+        log_error(NGX_LOG_ERR, ctx, "parse body", "chunked unsupported");
         return NGX_ERROR;
     }
 
-    if (ctx->remains == -1)
+    if (ctx->remains == -1) {
         // receiving data until to close connection for HTTP/1.0
-        return NGX_AGAIN;
+        return ctx->eof ? NGX_OK : NGX_AGAIN;
+    }
 
     ctx->remains -= ctx->last->last - ctx->last->pos;
 
@@ -337,6 +339,13 @@ parse_body(ngx_http_send_request_ctx_t *ctx)
 
     if (ctx->remains == 0)
         return NGX_OK;
+
+    if (ctx->eof) {
+
+        log_error(NGX_LOG_ERR, ctx, "parse body",
+            "connection closed on read body");
+        return NGX_ERROR;
+    }
 
     return NGX_AGAIN;
 }
@@ -371,8 +380,10 @@ receive_data(ngx_connection_t *c)
         size = c->recv(c, ctx->last->last,
             ngx_min(ctx->remains, ctx->last->end - ctx->last->last));
 
+    ctx->eof = c->read->pending_eof;
+
     log_error_details(NGX_LOG_DEBUG, ctx, "recv", "data", "rc=%l, eof=%ud",
-        size, c->read->pending_eof);
+        size, ctx->eof);
 
     if (size > 0) {
         chunk.data = ctx->last->last;
@@ -382,14 +393,17 @@ receive_data(ngx_connection_t *c)
     }
 
     if (size == NGX_ERROR)
-        return c->read->pending_eof ? NGX_OK : NGX_ERROR;
+        return ctx->eof ? NGX_OK : NGX_ERROR;
 
     if (size == NGX_AGAIN)
         return NGX_AGAIN;
 
+    if (size == 0 && ctx->eof)
+        return NGX_DECLINED;
+
     ctx->last->last += size;
 
-    return c->read->pending_eof ? NGX_OK : NGX_DONE;
+    return ctx->eof ? NGX_OK : NGX_DONE;
 }
 
 
@@ -407,18 +421,25 @@ receive_body(ngx_connection_t *c)
 
             case NGX_AGAIN:
                 break;
+
+            case NGX_ERROR:
+            default:
+                return NGX_ERROR;
         }
 
         switch (receive_data(c)) {
 
             case NGX_OK:
-                return NGX_OK;
-
             case NGX_DONE:
+            case NGX_DECLINED:
                 continue;
 
             case NGX_AGAIN:
                 return NGX_AGAIN;
+
+            case NGX_ERROR:
+            default:
+                return NGX_ERROR;
         }
 
         break;
@@ -478,9 +499,16 @@ receive_response(ngx_connection_t *c)
 
 receive:
 
+        if (ctx->eof) {
+
+            log_error(NGX_LOG_ERR, ctx, "recv", "closed");
+            return NGX_ERROR;
+        }
+
         switch (receive_data(c)) {
             case NGX_OK:
             case NGX_DONE:
+            case NGX_DECLINED:
                 continue;
 
             case NGX_AGAIN:
