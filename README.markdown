@@ -3,10 +3,6 @@ Name
 
 ngx_http_upsync_upstream - Upstream synced by http request.
 
-# !!! Attention !!!
-This module has one important dependency: [ngx_dynamic_upstream](https://github.com/ZigzagAK/ngx_dynamic_upstream).
-While this module is under development you MUST download `ngx_dynamic_upstream` (remove from `src` folder) any time you pull changes from github.
-
 # Quick Start
 
 ## Nginx config
