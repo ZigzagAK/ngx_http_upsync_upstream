@@ -1,6 +1,7 @@
 #include "ngx_http_send_request.h"
 #include <assert.h>
 #include <ngx_http.h>
+#include <assert.h>
 
 
 typedef struct {
@@ -246,6 +247,7 @@ parse_header(ngx_http_send_request_ctx_t *ctx)
     ngx_keyval_t        *h;
 
     switch (ngx_http_parse_header_line(r, ctx->last, 1)) {
+
         case NGX_OK:
             break;
 
@@ -256,15 +258,10 @@ parse_header(ngx_http_send_request_ctx_t *ctx)
             return NGX_HTTP_PARSE_HEADER_DONE;
 
         case NGX_HTTP_PARSE_INVALID_HEADER:
-            return NGX_DECLINED;
-
         case NGX_ERROR:
         default:
             return NGX_ERROR;
     }
-
-    if (r->header_name_end == r->header_name_start)
-        return NGX_DECLINED;
 
     h = ngx_array_push(ctx->headers);
     if (h == NULL)
@@ -290,21 +287,27 @@ parse_headers(ngx_http_send_request_ctx_t *ctx)
 
         switch (parse_header(ctx)) {
 
-            case NGX_OK:
-            case NGX_DECLINED:
-                continue;
-
             case NGX_AGAIN:
+
                 return NGX_AGAIN;
 
-            case NGX_HTTP_PARSE_HEADER_DONE:
-                return NGX_HTTP_PARSE_HEADER_DONE;
-        }
+            case NGX_OK:
 
-        break;
+                break;
+
+            case NGX_HTTP_PARSE_HEADER_DONE:
+
+                return NGX_HTTP_PARSE_HEADER_DONE;
+
+            case NGX_ERROR:
+            default:
+                return NGX_ERROR;
+        }
     }
 
-    return NGX_ERROR;
+    assert(0);
+
+    return NGX_ABORT;
 }
 
 
