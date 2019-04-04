@@ -816,10 +816,10 @@ ngx_http_upsync_sync_upstream_handler(ngx_int_t rc,
 
 end:
 
-    ngx_destroy_pool(ctx->pool);
-
     ctx->hscf->last = ngx_current_msec;
     ctx->hscf->busy = 0;
+
+    ngx_destroy_pool(ctx->pool);
 
     return;
 
@@ -855,7 +855,7 @@ ngx_http_upsync_sync_upstream(ngx_http_upsync_upstream_srv_conf_t *hscf)
 
     ctx->pool = pool;
     ctx->hscf = hscf;
-    
+
     ngx_http_send_request(pool, GET, &hscf->url, NULL, 0,
         hscf->headers->elts, hscf->headers->nelts, NULL,
         hscf->timeout, ngx_http_upsync_sync_upstream_handler, ctx);
