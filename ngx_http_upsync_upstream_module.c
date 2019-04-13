@@ -140,7 +140,10 @@ ngx_http_upsync_upstream_create_srv_conf(ngx_conf_t *cf)
 
     uscf->timeout = NGX_CONF_UNSET_MSEC;
     uscf->interval = NGX_CONF_UNSET_MSEC;
-    
+    uscf->headers = ngx_array_create(cf->pool, 4, sizeof(ngx_keyval_t));
+    if (uscf->headers == NULL)
+        return NULL;
+
     return uscf;
 }
 
