@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2018 Aleksei Konovkin (alkon2000@mail.ru)
+ */
+
 #include <ngx_core.h>
 
 #include <ngx_http.h>
@@ -11,16 +15,8 @@ static void *
 ngx_http_upsync_upstream_create_srv_conf(ngx_conf_t *cf);
 
 
-static ngx_int_t
-ngx_http_upsync_upstream_post_conf(ngx_conf_t *cf);
-
-
 ngx_int_t
 ngx_http_upsync_upstream_init_worker(ngx_cycle_t *cycle);
-
-
-void
-ngx_http_upsync_upstream_exit_worker(ngx_cycle_t *cycle);
 
 
 static char *
@@ -102,7 +98,7 @@ static ngx_command_t ngx_http_upsync_upstream_commands[] = {
 
 static ngx_http_module_t ngx_http_upsync_upstream_ctx = {
     NULL,                                         /* preconfiguration */
-    ngx_http_upsync_upstream_post_conf,           /* postconfiguration */
+    NULL,                                         /* postconfiguration */
     NULL,                                         /* create main */
     NULL,                                         /* init main */
     ngx_http_upsync_upstream_create_srv_conf,     /* create server */
@@ -122,7 +118,7 @@ ngx_module_t ngx_http_upsync_upstream_module = {
     ngx_http_upsync_upstream_init_worker,     /* init process */
     NULL,                                     /* init thread */
     NULL,                                     /* exit thread */
-    ngx_http_upsync_upstream_exit_worker,     /* exit process */
+    NULL,                                     /* exit process */
     NULL,                                     /* exit master */
     NGX_MODULE_V1_PADDING
 };
@@ -296,11 +292,8 @@ ngx_http_upsync_sync_handler(ngx_event_t *ev)
 {
     ngx_http_upsync_sync_upstreams();
 
-    if (ngx_exiting || ngx_terminate || ngx_quit) {
-        // cleanup
-        ngx_memset(ev, 0, sizeof(ngx_event_t));
+    if (ngx_exiting || ngx_terminate || ngx_quit)
         return;
-    }
 
     ngx_add_timer(ev, 1000);
 }
@@ -489,90 +482,16 @@ ngx_http_upsync_save_handler(ngx_event_t *ev)
 }
 
 
-static ngx_uint_t count = 0;
-
-static ngx_int_t
-ngx_http_upsync_upstream_post_conf(ngx_conf_t *cf)
-{
-    ngx_http_upstream_main_conf_t         *umcf;
-    ngx_http_upstream_srv_conf_t         **uscf;
-    ngx_http_upsync_upstream_srv_conf_t   *hscf;
-    ngx_uint_t                             j;
-    save_context_t                        *ctx;
-
-    umcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_module);
-    uscf = umcf->upstreams.elts;
-
-    for (j = 0; j < umcf->upstreams.nelts; j++) {
-
-        if (uscf[j]->srv_conf == NULL || uscf[j]->shm_zone == NULL)
-            continue;
-
-        hscf = ngx_http_conf_upstream_srv_conf(uscf[j],
-            ngx_http_upsync_upstream_module);
-
-        if (hscf->uri.data == NULL)
-            continue;
-
-        count++;
-
-        hscf->uscf = uscf[j];
-        hscf->url.url = hscf->uri;
-        hscf->url.uri_part = 1;
-        hscf->url.default_port = 80;
-
-        ctx = ngx_pcalloc(cf->pool, sizeof(save_context_t));
-        if (ctx == NULL)
-            return NGX_ERROR;
-
-        ctx->hscf = hscf;
-        ctx->c.fd = -1;
-
-        hscf->ev.log = cf->cycle->log;
-        hscf->ev.data = ctx;
-        hscf->ev.handler = ngx_http_upsync_save_handler;
-
-        if (ngx_parse_url(cf->pool, &hscf->url) != NGX_OK) {
-
-            ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
-                          "http_upsync upstream: [%V] failed "
-                          "to parse uri: %V", &hscf->uscf->host, &hscf->uri);
-            return NGX_ERROR;
-        }
-
-        ngx_conf_init_msec_value(hscf->interval, 60000);
-        ngx_conf_init_msec_value(hscf->timeout, 10000);
-
-        ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
-                      "http_upsync upstream: [%V] sync on", &hscf->uscf->host);
-    }
-
-    return NGX_OK;
-}
-
-
 ngx_int_t
 ngx_http_upsync_upstream_init_worker(ngx_cycle_t *cycle)
 {
     if (ngx_process != NGX_PROCESS_WORKER && ngx_process != NGX_PROCESS_SINGLE)
         return NGX_OK;
 
-    if (count != 0) {
-        sync_ev.log = cycle->log;
-        ngx_add_timer(&sync_ev, 0);
-    }
+    sync_ev.log = cycle->log;
+    ngx_http_upsync_sync_handler(&sync_ev);
 
     return NGX_OK;
-}
-
-
-void
-ngx_http_upsync_upstream_exit_worker(ngx_cycle_t *cycle)
-{
-    if (sync_ev.log != NULL) {
-        ngx_del_timer(&sync_ev);
-        ngx_memset(&sync_ev, 0, sizeof(ngx_event_t));
-    }
 }
 
 
@@ -877,13 +796,14 @@ nomem:
 
 
 static ngx_int_t
-ngx_http_upsync_sync_upstreams(ngx_cycle_t *cycle)
+ngx_http_upsync_sync_upstreams()
 {
     ngx_http_upstream_main_conf_t         *umcf;
     ngx_http_upstream_srv_conf_t         **uscf;
     ngx_http_upsync_upstream_srv_conf_t   *hscf;
     ngx_core_conf_t                       *ccf;
     ngx_uint_t                             j;
+    save_context_t                        *ctx;
 
     ccf = (ngx_core_conf_t *) ngx_get_conf(ngx_cycle->conf_ctx,
                                            ngx_core_module);
@@ -893,8 +813,56 @@ ngx_http_upsync_sync_upstreams(ngx_cycle_t *cycle)
     uscf = umcf->upstreams.elts;
 
     for (j = 0; j < umcf->upstreams.nelts; j++) {
+
+        if (uscf[j]->srv_conf == NULL || uscf[j]->shm_zone == NULL)
+            continue;
+
         hscf = ngx_http_conf_upstream_srv_conf(uscf[j],
             ngx_http_upsync_upstream_module);
+
+        if (hscf->uri.data == NULL)
+            continue;
+
+        if (hscf->uscf == NULL) {
+
+            hscf->url.url = hscf->uri;
+            hscf->url.uri_part = 1;
+            hscf->url.default_port = 80;
+
+            ctx = ngx_pcalloc(ngx_cycle->pool, sizeof(save_context_t));
+            if (ctx == NULL) {
+                ngx_log_error(NGX_LOG_CRIT, ngx_cycle->log, 0,
+                              "http_upsync upstream: no memory",
+                              &uscf[j]->host);
+                continue;
+            }
+
+            ctx->hscf = hscf;
+            ctx->c.fd = -1;
+
+            hscf->ev.log = ngx_cycle->log;
+            hscf->ev.data = ctx;
+            hscf->ev.handler = ngx_http_upsync_save_handler;
+
+            if (ngx_parse_url(ngx_cycle->pool, &hscf->url) != NGX_OK) {
+
+                ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
+                              "http_upsync upstream: [%V] failed "
+                              "to parse uri: %V",
+                              &uscf[j]->host, &hscf->uri);
+                hscf->uri.data = NULL;
+                continue;
+            }
+
+            ngx_conf_init_msec_value(hscf->interval, 60000);
+            ngx_conf_init_msec_value(hscf->timeout, 10000);
+
+            hscf->uscf = uscf[j];
+
+            ngx_log_error(NGX_LOG_INFO, ngx_cycle->log, 0,
+                          "http_upsync upstream: [%V] sync on",
+                          &uscf[j]->host);
+        }
 
         if (hscf->uscf == NULL)
             continue;

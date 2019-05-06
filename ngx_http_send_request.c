@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2018 Aleksei Konovkin (alkon2000@mail.ru)
+ */
+
 #include "ngx_http_send_request.h"
 #include <assert.h>
 #include <ngx_http.h>

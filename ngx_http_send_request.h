@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2018 Aleksei Konovkin (alkon2000@mail.ru)
+ */
+
 #ifndef _ngx_http_send_request_h_
 #define _ngx_http_send_request_h_
 
