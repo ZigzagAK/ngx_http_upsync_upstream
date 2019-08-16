@@ -387,10 +387,11 @@ receive_data(ngx_connection_t *c)
         size = c->recv(c, ctx->last->last,
             ngx_min(ctx->remains, ctx->last->end - ctx->last->last));
 
-    ctx->eof = c->read->pending_eof;
+    ctx->eof = c->read->eof;
 
-    log_error_details(NGX_LOG_DEBUG, ctx, "recv", "data", "rc=%l, eof=%ud",
-        size, ctx->eof);
+    log_error_details(NGX_LOG_DEBUG, ctx,
+                      "recv", "data", "rc=%l, eof=%ud, pending_eof=%ud",
+                      size, ctx->eof, c->read->pending_eof);
 
     if (size > 0) {
         chunk.data = ctx->last->last;
@@ -399,18 +400,31 @@ receive_data(ngx_connection_t *c)
             &chunk);
     }
 
-    if (size == NGX_ERROR)
-        return ctx->eof ? NGX_OK : NGX_ERROR;
+    if (size == NGX_ERROR) {
+
+        if (c->read->pending_eof) {
+
+            ctx->eof = 1;
+            return NGX_OK;
+        }
+
+        return NGX_ERROR;
+    }
 
     if (size == NGX_AGAIN)
         return NGX_AGAIN;
 
-    if (size == 0 && ctx->eof)
-        return NGX_DECLINED;
-
     ctx->last->last += size;
 
-    return ctx->eof ? NGX_OK : NGX_DONE;
+    if (ctx->eof) {
+
+        if (size == 0)
+            return NGX_DECLINED;
+
+        return NGX_OK;
+    }
+
+    return NGX_DONE;
 }
 
 
